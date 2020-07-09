@@ -25,7 +25,7 @@ type Key struct {
 	// This is the nonce that should be used for the next transaction.
 	// Conceptually equivalent to geth's `PendingNonceAt` but more reliable
 	// because we have a better view of our own transactions
-	NextNonce int64
+	NextNonce *int64
 }
 
 // NewKeyFromFile creates an instance in memory from a key file on disk.
