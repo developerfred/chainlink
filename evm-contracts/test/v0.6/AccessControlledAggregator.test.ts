@@ -13,6 +13,8 @@ const linkTokenFactory = new contract.LinkTokenFactory()
 const testHelperFactory = new FluxAggregatorTestHelperFactory()
 const provider = setup.provider()
 let personas: setup.Personas
+const emptyAddress = '0x0000000000000000000000000000000000000000'
+
 beforeAll(async () => {
   await setup.users(provider).then(u => (personas = u.personas))
 })
@@ -43,6 +45,7 @@ describe('AccessControlledAggregator', () => {
         link.address,
         paymentAmount,
         timeout,
+        emptyAddress,
         minSubmissionValue,
         maxSubmissionValue,
         decimals,
@@ -67,6 +70,7 @@ describe('AccessControlledAggregator', () => {
       'acceptAdmin',
       'addOracles',
       'allocatedFunds',
+      'answerValidator',
       'availableFunds',
       'decimals',
       'description',
@@ -93,6 +97,7 @@ describe('AccessControlledAggregator', () => {
       'reportingRound',
       'requestNewRound',
       'restartDelay',
+      'setAnswerValidator',
       'setRequesterPermissions',
       'submit',
       'timeout',

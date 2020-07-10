@@ -9,12 +9,23 @@ import { assert } from 'chai'
 import { ethers } from 'ethers'
 import { FluxAggregatorFactory } from '../../ethers/v0.6/FluxAggregatorFactory'
 import { FluxAggregatorTestHelperFactory } from '../../ethers/v0.6/FluxAggregatorTestHelperFactory'
+import { AnswerValidatorTestHelperFactory } from '../../ethers/v0.6/AnswerValidatorTestHelperFactory'
+import { GasGuzzlerFactory } from '../../ethers/v0.6/GasGuzzlerFactory'
+import { HistoricDeviationValidatorFactory } from '../../ethers/v0.6/HistoricDeviationValidatorFactory'
+import { FlagsFactory } from '../../ethers/v0.6/FlagsFactory'
+import { SimpleWriteAccessControllerFactory } from '../../ethers/v0.6/SimpleWriteAccessControllerFactory'
 
 let personas: setup.Personas
 const provider = setup.provider()
 const linkTokenFactory = new contract.LinkTokenFactory()
 const fluxAggregatorFactory = new FluxAggregatorFactory()
+const answerValidatorFactory = new AnswerValidatorTestHelperFactory()
 const testHelperFactory = new FluxAggregatorTestHelperFactory()
+const validatorFactory = new HistoricDeviationValidatorFactory()
+const flagsFactory = new FlagsFactory()
+const acFactory = new SimpleWriteAccessControllerFactory()
+const gasGuzzlerFactory = new GasGuzzlerFactory()
+const emptyAddress = '0x0000000000000000000000000000000000000000'
 
 beforeAll(async () => {
   personas = await setup.users(provider).then(x => x.personas)
@@ -37,6 +48,8 @@ describe('FluxAggregator', () => {
   let aggregator: contract.Instance<FluxAggregatorFactory>
   let link: contract.Instance<contract.LinkTokenFactory>
   let testHelper: contract.Instance<FluxAggregatorTestHelperFactory>
+  let validator: contract.Instance<AnswerValidatorTestHelperFactory>
+  let gasGuzzler: contract.Instance<GasGuzzlerFactory>
   let nextRound: number
   let oracles: ethers.Wallet[]
 
@@ -171,6 +184,7 @@ describe('FluxAggregator', () => {
         link.address,
         paymentAmount,
         timeout,
+        emptyAddress,
         minSubmissionValue,
         maxSubmissionValue,
         decimals,
@@ -191,6 +205,7 @@ describe('FluxAggregator', () => {
       'acceptAdmin',
       'addOracles',
       'allocatedFunds',
+      'answerValidator',
       'availableFunds',
       'decimals',
       'description',
@@ -218,6 +233,7 @@ describe('FluxAggregator', () => {
       'requestNewRound',
       'restartDelay',
       'setRequesterPermissions',
+      'setAnswerValidator',
       'submit',
       'timeout',
       'transferAdmin',
@@ -847,6 +863,58 @@ describe('FluxAggregator', () => {
             .submit(nextRound, maxSubmissionValue.add(1)),
           'value above maxSubmissionValue',
         )
+      })
+    })
+
+    describe('when an answer validator is set', () => {
+      beforeEach(async () => {
+        await updateFutureRounds(aggregator, { minAnswers: 1, maxAnswers: 1 })
+        oracles = [personas.Nelly]
+
+        validator = await answerValidatorFactory
+          .connect(personas.Carol)
+          .deploy()
+        await aggregator
+          .connect(personas.Carol)
+          .setAnswerValidator(validator.address)
+        assert.equal(validator.address, await aggregator.answerValidator())
+      })
+
+      it('calls out to the validator', async () => {
+        const tx = await aggregator
+          .connect(personas.Nelly)
+          .submit(nextRound, answer)
+        const receipt = await tx.wait()
+
+        const event = matchers.eventExists(
+          receipt,
+          validator.interface.events.Validated,
+        )
+        matchers.bigNum(0, h.bigNum(event.topics[1]))
+        matchers.bigNum(answer, h.bigNum(event.topics[2]))
+      })
+    })
+
+    describe('when the answer validator eats all gas', () => {
+      beforeEach(async () => {
+        await updateFutureRounds(aggregator, { minAnswers: 1, maxAnswers: 1 })
+        oracles = [personas.Nelly]
+
+        gasGuzzler = await gasGuzzlerFactory.connect(personas.Carol).deploy()
+        await aggregator
+          .connect(personas.Carol)
+          .setAnswerValidator(gasGuzzler.address)
+        assert.equal(gasGuzzler.address, await aggregator.answerValidator())
+      })
+
+      it('still updates', async () => {
+        matchers.bigNum(0, await aggregator.latestAnswer())
+
+        await aggregator
+          .connect(personas.Nelly)
+          .submit(nextRound, answer, { gasLimit: 500000 })
+
+        matchers.bigNum(answer, await aggregator.latestAnswer())
       })
     })
   })
@@ -2779,6 +2847,102 @@ describe('FluxAggregator', () => {
           paymentAmount,
         })
       })
+    })
+  })
+
+  describe('#setAnswerValidator', () => {
+    beforeEach(async () => {
+      validator = await answerValidatorFactory.connect(personas.Carol).deploy()
+    })
+
+    it('changes the answer validator', async () => {
+      assert.equal(emptyAddress, await aggregator.answerValidator())
+
+      await aggregator
+        .connect(personas.Carol)
+        .setAnswerValidator(validator.address)
+
+      assert.equal(validator.address, await aggregator.answerValidator())
+    })
+
+    it('emits a log event', async () => {
+      const tx = await aggregator
+        .connect(personas.Carol)
+        .setAnswerValidator(validator.address)
+      const receipt = await tx.wait()
+      const eventLog = matchers.eventExists(
+        receipt,
+        aggregator.interface.events.AnswerValidatorUpdated,
+      )
+
+      assert.equal(emptyAddress, h.eventArgs(eventLog).previous)
+      assert.equal(validator.address, h.eventArgs(eventLog).current)
+
+      const sameChangeTx = await aggregator
+        .connect(personas.Carol)
+        .setAnswerValidator(validator.address)
+      const sameChangeReceipt = await sameChangeTx.wait()
+      assert.equal(0, sameChangeReceipt.events?.length)
+      matchers.eventDoesNotExist(
+        sameChangeReceipt,
+        aggregator.interface.events.AnswerValidatorUpdated,
+      )
+    })
+
+    describe('when called by a non-owner', () => {
+      it('reverts', async () => {
+        await matchers.evmRevert(
+          aggregator
+            .connect(personas.Neil)
+            .setAnswerValidator(validator.address),
+          'Only callable by owner',
+        )
+      })
+    })
+  })
+
+  describe('integrating with historic deviation checker', () => {
+    let validator: contract.Instance<HistoricDeviationValidatorFactory>
+    let flags: contract.Instance<FlagsFactory>
+    let ac: contract.Instance<SimpleWriteAccessControllerFactory>
+    const flaggingThreshold = 1000 // 1%
+
+    beforeEach(async () => {
+      ac = await acFactory.connect(personas.Carol).deploy()
+      flags = await flagsFactory.connect(personas.Carol).deploy(ac.address)
+      validator = await validatorFactory
+        .connect(personas.Carol)
+        .deploy(flags.address, flaggingThreshold)
+      await ac.connect(personas.Carol).addAccess(validator.address)
+
+      await aggregator
+        .connect(personas.Carol)
+        .setAnswerValidator(validator.address)
+
+      oracles = [personas.Nelly]
+      const minMax = oracles.length
+      await addOracles(aggregator, oracles, minMax, minMax, rrDelay)
+    })
+
+    it('raises a flag on with high enough deviation', async () => {
+      await aggregator.connect(personas.Nelly).submit(nextRound, 100)
+      nextRound++
+
+      const tx = await aggregator.connect(personas.Nelly).submit(nextRound, 102)
+      const receipt = await tx.wait()
+      const event = matchers.eventExists(receipt, flags.interface.events.FlagOn)
+
+      assert.equal(flags.address, event.address)
+      assert.equal(aggregator.address, h.evmWordToAddress(event.topics[1]))
+    })
+
+    it('does not raise a flag with low enough deviation', async () => {
+      await aggregator.connect(personas.Nelly).submit(nextRound, 100)
+      nextRound++
+
+      const tx = await aggregator.connect(personas.Nelly).submit(nextRound, 101)
+      const receipt = await tx.wait()
+      matchers.eventDoesNotExist(receipt, flags.interface.events.FlagOn)
     })
   })
 })
